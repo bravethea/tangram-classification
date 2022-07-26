@@ -9,12 +9,14 @@ from ..model import PoseTaggingModel
 class ModelTestCase(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.class_weights = [1.01, 1, 1, 1, 1]
         self.pose_dim = (2, 2)
         self.seq_length = 5
         self.hidden_dim = 4
 
     def model_setup(self):
         model = PoseTaggingModel(
+            class_weights=self.class_weights,
             hidden_dim=self.hidden_dim,
             pose_dims=self.pose_dim,
             encoder_depth=2
@@ -28,8 +30,8 @@ class ModelTestCase(unittest.TestCase):
                 "data": torch.ones([2, self.seq_length, *self.pose_dim], dtype=torch.float),
             },
             "mask": torch.ones([2, self.seq_length], dtype=torch.float),
-            "sign_bio": torch.zeros((2, self.seq_length), dtype=torch.long),
-            "sentence_bio": torch.zeros((2, self.seq_length), dtype=torch.long)
+            "lh": torch.zeros((2, self.seq_length), dtype=torch.long),
+            "rh": torch.zeros((2, self.seq_length), dtype=torch.long)
         }
 
     def test_forward_yields_bio_probs(self):
@@ -38,18 +40,18 @@ class ModelTestCase(unittest.TestCase):
         log_probs = model.forward(batch["pose"]["data"])
 
         # shape check
-        self.assertEqual(log_probs["sign"].shape, (len(batch["sign_bio"]), self.seq_length, 3))
-        self.assertEqual(log_probs["sentence"].shape, (len(batch["sign_bio"]), self.seq_length, 3))
+        self.assertEqual(log_probs["lh"].shape, (len(batch["lh"]), self.seq_length, 5))
+        self.assertEqual(log_probs["rh"].shape, (len(batch["rh"]), self.seq_length, 5))
 
         # nan / inf check
-        self.assertTrue(torch.all(torch.isfinite(log_probs["sign"])))
-        self.assertTrue(torch.all(torch.isfinite(log_probs["sentence"])))
+        self.assertTrue(torch.all(torch.isfinite(log_probs["lh"])))
+        self.assertTrue(torch.all(torch.isfinite(log_probs["rh"])))
 
         # softmax probs check
-        sum_sign = torch.exp(log_probs["sign"]).sum(-1)
-        self.assertTrue(torch.allclose(sum_sign, torch.ones_like(sum_sign)))
-        sum_sentence = torch.exp(log_probs["sentence"]).sum(-1)
-        self.assertTrue(torch.allclose(sum_sentence, torch.ones_like(sum_sentence)))
+        sum_lh = torch.exp(log_probs["lh"]).sum(-1)
+        self.assertTrue(torch.allclose(sum_lh, torch.ones_like(sum_lh)))
+        sum_rh = torch.exp(log_probs["rh"]).sum(-1)
+        self.assertTrue(torch.allclose(sum_rh, torch.ones_like(sum_rh)))
 
     def test_training_step_expected_loss_finite(self):
         model = self.model_setup()

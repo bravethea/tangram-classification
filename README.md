@@ -1,11 +1,16 @@
-# Transcription
+# tangram
 
-Repository for sign language transcription related models.
+Repository for pose classification for the tangram project.
 
-Ideally pose based models should use a shared large-pose-language-model,
-able to encode arbitrary pose sequence lengths, and pre-trained on non-autoregressive reconstruction.
+- [shared](shared) - includes shared utilities for our models
+- [pose_to_segments](pose_to_segments) - classifies pose sequences on a frame level
 
-- [shared](shared) - includes shared utilities for all models
-- [pose_to_segments](pose_to_segments) - segments pose sequences
-- [text_to_pose](text_to_pose) - animates poses using text
-- [pose_to_text](pose_to_text) - generates text from poses
+## Data
+
+Download the data from [here](https://drive.google.com/drive/folders/12Ow8S7-wyezrLt2LalittxZj91RTdA4S) and put it in the `pose_to_segments/data` directory.
+
+## Training
+
+```bash
+python -m pose_to_segments.train
+```

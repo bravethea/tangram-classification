@@ -11,12 +11,11 @@ parser = ArgumentParser()
 parser.add_argument('--no_wandb', type=bool, default=False, help='ignore wandb?')
 # Training Arguments
 parser.add_argument('--seed', type=int, default=42, help='random seed')
-parser.add_argument('--gpus', type=int, default=1, help='how many gpus')
+parser.add_argument('--gpus', type=int, default=None, help='how many gpus')
 parser.add_argument('--batch_size', type=int, default=4, help='batch size')
 
 # Data Arguments
-parser.add_argument('--fps', type=int, default=25, help='fps to load')
-parser.add_argument('--pose', choices=['holistic'], default='holistic', help='which pose estimation')
+parser.add_argument('--fps', type=int, default=None, help='fps to load')
 parser.add_argument('--pose_components', type=list,
                     default=["POSE_LANDMARKS", "LEFT_HAND_LANDMARKS", "RIGHT_HAND_LANDMARKS"],  # , "FACE_LANDMARKS"
                     help='what pose components to use?')

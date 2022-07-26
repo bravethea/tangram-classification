@@ -1,3 +1,7 @@
 .idea/
 __pycache__
 .pytest_cache
+pose_to_segments/data
+!pose_to_segments/.gitkeep
+wandb/
+models/

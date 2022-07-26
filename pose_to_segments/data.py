@@ -1,29 +1,34 @@
-from itertools import chain
-from typing import List, TypedDict, Dict, Iterable
+import os
+from pathlib import Path
+from typing import List, TypedDict, Dict
 
+import pympi
 import torch
 from pose_format import Pose
-from sign_language_datasets.datasets.dgs_corpus.dgs_utils import get_elan_sentences
 from torch.utils.data import Dataset
-from ..shared.tfds_dataset import get_tfds_dataset, ProcessedPoseDatum
+
+from tqdm import tqdm
+from collections import Counter
+from shared.pose_utils import pose_normalization_info, pose_hide_legs
 
 
 class Segment(TypedDict):
     start_time: float
     end_time: float
+    gesture: str
 
 
 class PoseSegmentsDatum(TypedDict):
     id: str
-    segments: List[List[Segment]]
+    segments: Dict[str, List[Segment]]
     pose: Pose
 
 
-BIO = {"O": 0, "B": 1, "I": 2}
+CLASSES = {"-": 0, "PG": 1, "IG": 2, "OG": 3, "UG": 4}
 
 
-def build_bio(timestamps: torch.Tensor, segments: List[Segment]):
-    bio = torch.zeros(len(timestamps), dtype=torch.long)
+def build_classes_vector(timestamps: torch.Tensor, segments: List[Segment]):
+    classes = torch.zeros(len(timestamps), dtype=torch.long)
 
     timestamp_i = 0
     for segment in segments:
@@ -34,10 +39,9 @@ def build_bio(timestamps: torch.Tensor, segments: List[Segment]):
             timestamp_i += 1
         segment_end_i = timestamp_i
 
-        bio[segment_start_i] = BIO["B"]
-        bio[segment_start_i + 1:segment_end_i] = BIO["I"]
+        classes[segment_start_i:segment_end_i] = CLASSES[segment["gesture"]]
 
-    return bio
+    return classes
 
 
 class PoseSegmentsDataset(Dataset):
@@ -47,59 +51,89 @@ class PoseSegmentsDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def build_classes_vectors(self, datum):
+        pose_length = len(datum["pose"].body.data)
+        timestamps = torch.div(torch.arange(0, pose_length), datum["pose"].body.fps)
+
+        return {
+            "lh": build_classes_vector(timestamps, datum["segments"]["LH"]),
+            "rh": build_classes_vector(timestamps, datum["segments"]["RH"])
+        }
+
     def __getitem__(self, index):
-        datum = self.data[index]
+        datum: PoseSegmentsDatum = self.data[index]
         pose = datum["pose"]
-
-        pose_length = len(pose.body.data)
-        timestamps = torch.div(torch.arange(0, pose_length), pose.body.fps)
-
-        # Build sign BIO
-        sign_bio = build_bio(timestamps, [segment for sentence_segments in datum["segments"]
-                                          for segment in sentence_segments])
-
-        # Build sentence BIO
-        sentence_segments = [{"start_time": segments[0]["start_time"], "end_time": segments[-1]["end_time"]}
-                             for segments in datum["segments"]]
-        sentence_bio = build_bio(timestamps, sentence_segments)
 
         torch_body = pose.body.torch()
         pose_data = torch_body.data.tensor[:, 0, :, :]
         return {
             "id": datum["id"],
-            "sentence_bio": sign_bio,
-            "sign_bio": sentence_bio,
-            "mask": torch.ones(len(sign_bio), dtype=torch.float),
+            **self.build_classes_vectors(datum),
+            "mask": torch.ones(len(pose.body.data), dtype=torch.float),
             "pose": {
                 "obj": pose,
                 "data": pose_data
             }
         }
 
-
-def process_datum(datum: ProcessedPoseDatum) -> Iterable[PoseSegmentsDatum]:
-    poses: Dict[str, Pose] = datum["pose"]
-
-    elan_path = datum["tf_datum"]["paths"]["eaf"].numpy().decode('utf-8')
-    sentences = get_elan_sentences(elan_path)
-
-    for person in ["a", "b"]:
-        if len(poses[person].body.data) > 0:
-            segments = [[{"start_time": gloss["start"] / 1000, "end_time": gloss["end"] / 1000}
-                         for gloss in s["glosses"]] for s in sentences
-                        if s["participant"].lower() == person and len(s["glosses"]) > 0]
-            if len(segments) > 0:
-                yield {
-                    "id": datum["id"] + "_" + person,
-                    "pose": poses[person],
-                    "segments": segments
-                }
+    def inverse_classes_ratio(self) -> List[float]:
+        counter = Counter()
+        for datum in self.data:
+            classes = self.build_classes_vectors(datum)
+            for hand_classes in classes.values():
+                counter += Counter(hand_classes.numpy().tolist())
+        sum_counter = sum(counter.values())
+        print(counter)
+        return [sum_counter / counter[i] for c, i in CLASSES.items()]
 
 
-def get_dataset(name="dgs_corpus", poses="holistic", fps=25, split="train",
-                components: List[str] = None, data_dir=None):
-    data = get_tfds_dataset(name=name, poses=poses, fps=fps, split=split, components=components, data_dir=data_dir)
+def elan_file_to_segments(file_name: str) -> Dict[str, List[Segment]]:
+    eaf = pympi.Elan.Eaf(file_name)
+    segments = {}
+    for tier_name in eaf.get_tier_names():
+        spkr, hand = tier_name.split("_")
+        tier = eaf.tiers[tier_name][0]
+        annotations = list(tier.values())
+        segments_list = [Segment(start_time=eaf.timeslots[ts_start] / 1000,
+                                 end_time=eaf.timeslots[ts_end] / 1000,
+                                 gesture=gesture)
+                         for (ts_start, ts_end, gesture, _) in annotations]
+        segments[hand] = sorted(segments_list, key=lambda s: s["start_time"])
+    return segments
 
-    data = list(chain.from_iterable([process_datum(d) for d in data]))
 
+def process_datum(pose_file: str, elan_file: str, pose_components: List[str]) -> PoseSegmentsDatum:
+    with open(pose_file, "rb") as f:
+        pose = Pose.read(f.read())
+    # For some reason, data is read only
+    # pose.body.data = pose.body.data.copy()
+    # pose.body.confidence = pose.body.confidence.copy()
+    # Normalize and remove length for consistency
+    pose = pose.get_components(pose_components)
+    pose.normalize(pose_normalization_info(pose.header))
+    pose_hide_legs(pose)
+
+    segments = elan_file_to_segments(elan_file)
+    return PoseSegmentsDatum(id=pose_file, pose=pose, segments=segments)
+
+
+def get_dataset(components: List[str] = None):
+    current_directory = Path(__file__).parent
+
+    elan_directory = os.path.join(current_directory, "data", "elan_files")
+    pose_directory = os.path.join(current_directory, "data", "pose_files")
+
+    pose_file_names = os.listdir(pose_directory)
+    elan_file_names = [f.replace(".mp4", "").replace(".pose", ".eaf") for f in pose_file_names]
+
+    pose_files = [os.path.join(pose_directory, f) for f in pose_file_names]
+    elan_files = [os.path.join(elan_directory, f) for f in elan_file_names]
+
+    data = [process_datum(pose_file, elan_file, components)
+            for pose_file, elan_file in tqdm(list(zip(pose_files, elan_files)))]
     return PoseSegmentsDataset(data)
+
+
+if __name__ == "__main__":
+    dataset = get_dataset(["POSE_LANDMARKS"])
+    print(dataset.inverse_classes_ratio())
